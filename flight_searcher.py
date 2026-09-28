@@ -2,6 +2,7 @@ import threading
 import queue
 import time
 import random
+from collections import defaultdict
 
 # Raw mock flight catalog
 RAW_FLIGHTS = [
@@ -56,9 +57,11 @@ def run_flight_mapreduce(num_threads: int = 3):
     results_queue = queue.Queue()
     threads = []
 
-    # 1. Split workload into chunks for threads
-    chunk_size = (len(RAW_FLIGHTS) + num_threads - 1) // num_threads
-    chunks = [RAW_FLIGHTS[i:i + chunk_size] for i in range(0, len(RAW_FLIGHTS), chunk_size)]
+    # 1. Split workload por aerolínea (un chunk por aerolínea)
+    groups = defaultdict(list)
+    for flight in RAW_FLIGHTS:
+        groups[flight["airline"]].append(flight)
+    chunks = list(groups.values())
 
     # 2. Spawn and start Map threads
     print(f"--- Starting {len(chunks)} Map Threads ---")
@@ -83,8 +86,11 @@ def run_flight_mapreduce(num_threads: int = 3):
     return final_summary
 
 if __name__ == "__main__":
-    summary = run_flight_mapreduce(num_threads=3)
-    
+    summary = run_flight_mapreduce()
+
     print("\nCheapest Flight Per Airline:")
     for airline, flight in summary.items():
         print(f"  • {airline}: {flight['flight_id']} @ ${flight['price']} ({flight['stops']} stops)")
+
+    best = min(summary.values(), key=lambda f: (f["price"], f["stops"]))
+    print(f"\nÓptimo global: {best['airline']} {best['flight_id']} @ ${best['price']} ({best['stops']} stops)")
