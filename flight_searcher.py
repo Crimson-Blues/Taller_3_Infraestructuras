@@ -1,96 +1,138 @@
+#Nombre: flight_searcher
+#Autores:
+# - Juan Diego Cardenas Mejia - 2416427
+# - Samuel Banguero Ortega - 2418671
+#Fecha de Creación: 27/09/2026
+#Descripción: Clase que emplea la técnica de programación concurrente MapReduce para la búsqueda
+# del vuelo óptimo al interior de un conjunto de vuelos.
+#Curso: Infraestructuras Paralelas y Distribuidas
+#Código: 750023C
+
 import threading
 import queue
 import time
 import random
 from collections import defaultdict
 
-# Raw mock flight catalog
+# Dataset inventado de datos
+# Trayecto: Cali - Cartagena
 RAW_FLIGHTS = [
-    {"flight_id": "DL101", "airline": "Delta", "price": 320, "stops": 0},
-    {"flight_id": "DL202", "airline": "Delta", "price": 280, "stops": 1},
-    {"flight_id": "UA303", "airline": "United", "price": 410, "stops": 0},
-    {"flight_id": "UA404", "airline": "United", "price": 250, "stops": 1},
-    {"flight_id": "AA505", "airline": "American", "price": 300, "stops": 0},
-    {"flight_id": "AA606", "airline": "American", "price": 220, "stops": 2},
-    {"flight_id": "JB707", "airline": "JetBlue", "price": 290, "stops": 0},
-    {"flight_id": "JB808", "airline": "JetBlue", "price": 190, "stops": 1},
+    {"flight_id": "JA5301", "airline": "JetSmart", "price": 559598, "stops": 1},
+    {"flight_id": "JA5565", "airline": "JetSmart", "price": 436050, "stops": 1},
+    {"flight_id": "JA5533", "airline": "JetSmart", "price": 302270, "stops": 0},
+    {"flight_id": "JA5531", "airline": "JetSmart", "price": 274791, "stops": 0},
+    {"flight_id": "LA4356", "airline": "Latam", "price": 1567000, "stops": 1},
+    {"flight_id": "LA4356", "airline": "Latam", "price": 1567000, "stops": 1},
+    {"flight_id": "LA4357", "airline": "Latam", "price": 1875000, "stops": 1},
+    {"flight_id": "LA4060", "airline": "Latam", "price": 689430, "stops": 1},
+    {"flight_id": "LA4062", "airline": "Latam", "price": 781890, "stops": 1},
+    {"flight_id": "LA4163", "airline": "Latam", "price": 450574, "stops": 1},
+    {"flight_id": "AV9366", "airline": "Avianca", "price": 349241, "stops": 1},
+    {"flight_id": "AV9368", "airline": "Avianca", "price": 433241, "stops": 1},
+    {"flight_id": "AV9369", "airline": "Avianca", "price": 322513, "stops": 1},
+    {"flight_id": "AV9260", "airline": "Avianca", "price": 374588, "stops": 0},
+    {"flight_id": "AV9269", "airline": "Avianca", "price": 360588, "stops": 0},
+    {"flight_id": "AV9265", "airline": "Avianca", "price": 347861, "stops": 1}
 ]
 
-# --- MAP STAGE ---
-def map_worker(flight_chunk: list, results_queue: queue.Queue):
+random.shuffle(RAW_FLIGHTS) # Mezcla valores para tener un dataset realista
+
+# --- Fase de mapeo ---
+def map_worker(flight_chunk, results_queue):
     """
-    Map Worker Thread: Process a slice of flights.
-    Finds the cheapest flight per airline within its assigned chunk.
+    Mapper: Obtiene una porción de los vuelos y los clasifica por aerolinea.
+    Coloca los resultados en una cola de resultados
     """
-    # Simulate network/I/O delay per thread
+    # Simular delay en obtención de datos
     time.sleep(random.uniform(0.1, 0.5))
-    
-    local_cheapest = {}
+
+    #Default dict de listas para organizar listas de vuelos por aerolineas
+    mapped_flights = defaultdict(list)
+
     for flight in flight_chunk:
         airline = flight["airline"]
-        price = flight["price"]
-        
-        # Local map aggregation
-        if airline not in local_cheapest or price < local_cheapest[airline]["price"]:
-            local_cheapest[airline] = flight
+        mapped_flights[airline].append(flight)
 
-    # Push worker's intermediate results onto thread-safe queue
-    results_queue.put(local_cheapest)
+    # Resultado de mapeo en cola para reduce
+    results_queue.put(mapped_flights)
 
-# --- REDUCE STAGE ---
-def reduce_cheapest_by_airline(intermediate_results: list[dict]) -> dict:
+
+# --- Fase de shuffle ---
+def shuffle_phase(results_queue):
     """
-    Reducer: Merges intermediate dictionaries from all map threads 
-    to find the overall cheapest flight for each airline.
+    Shuffler: Obtiene los resultados intermedios de los mappers
+    y combina los resultados por llave de aerolínea. 
     """
-    final_cheapest = {}
+    grouped_by_airline = defaultdict(list)
     
-    for partial_result in intermediate_results:
-        for airline, flight in partial_result.items():
-            if airline not in final_cheapest or flight["price"] < final_cheapest[airline]["price"]:
-                final_cheapest[airline] = flight
+    while not results_queue.empty():
+        mapper_output = results_queue.get()
+        for airline, flights in mapper_output.items():
+            grouped_by_airline[airline].extend(flights)
+            
+    return grouped_by_airline  
+
+# --- Fase de reducción ---
+def reduce_worker(airline, flights, results):
+    """
+    Reducer: Combina los diccionarios de resultados intermedios de mappers,
+    para encontrar el vuelo más barato por aerolínea
+    """
+    cheapest = {"flight_id" : "", "price" : float('inf')}
+    for flight in flights:
+        price = flight["price"]
+        if price < cheapest["price"]:
+            cheapest = flight
                 
-    return final_cheapest
+    results[airline] = cheapest # Guardar resultado en lista
 
-# --- MAIN CONTROLLER ---
-def run_flight_mapreduce(num_threads: int = 3):
+# --- Función principal ---
+def run_flight_mapreduce(RAW_FLIGHTS, num_threads: int = 3):
     results_queue = queue.Queue()
-    threads = []
+    mapper_threads = []
 
-    # 1. Split workload por aerolínea (un chunk por aerolínea)
-    groups = defaultdict(list)
-    for flight in RAW_FLIGHTS:
-        groups[flight["airline"]].append(flight)
-    chunks = list(groups.values())
+    # Divide el dataset original de vuelos en chunks
+    chunk_size = (len(RAW_FLIGHTS) + num_threads - 1) // num_threads
+    chunks = [RAW_FLIGHTS[i:i + chunk_size] for i in range(0, len(RAW_FLIGHTS), chunk_size)]
 
-    # 2. Spawn and start Map threads
+    # Crea e inicia los hilos de mapeo
     print(f"--- Starting {len(chunks)} Map Threads ---")
     for i, chunk in enumerate(chunks):
-        t = threading.Thread(target=map_worker, args=(chunk, results_queue), name=f"MapThread-{i+1}")
-        threads.append(t)
+        t = threading.Thread(target=map_worker, args=(chunk, results_queue))
+        mapper_threads.append(t)
         t.start()
 
-    # 3. Synchronize (Barrier / Join)
-    for t in threads:
+    # Join de sincronización
+    for t in mapper_threads:
         t.join()
 
-    # 4. Gather intermediate results from queue
-    intermediate_results = []
-    while not results_queue.empty():
-        intermediate_results.append(results_queue.get())
+    # Shuffle para organizar por aerolineas
+    shuffled_data = shuffle_phase(results_queue)
 
-    # 5. Run Reducer
-    print("--- Running Reducer ---")
-    final_summary = reduce_cheapest_by_airline(intermediate_results)
-    
-    return final_summary
+    # Reducers
+    print("--- Running Reducers ---")
+    reducer_threads = []
+    results = {}
+
+    for airline in shuffled_data.keys():
+        t = threading.Thread(target=reduce_worker, args=(airline, shuffled_data[airline], results))
+        reducer_threads.append(t)
+        t.start()
+
+    # Join de sincronización
+    for t in reducer_threads:
+        t.join()
+
+    # Obtener el vuelo más barato a nivel global
+    global_cheapest = sorted(results.values(), key=lambda d: d['price'])[0]
+
+    return results, global_cheapest
 
 if __name__ == "__main__":
-    summary = run_flight_mapreduce()
+    summary, cheapest = run_flight_mapreduce(RAW_FLIGHTS)
 
-    print("\nCheapest Flight Per Airline:")
+    print("\nVuelo más barato por aerolínea")
     for airline, flight in summary.items():
-        print(f"  • {airline}: {flight['flight_id']} @ ${flight['price']} ({flight['stops']} stops)")
+        print(f"  • {airline}: {flight['flight_id']} @ ${flight['price']} ({flight['stops']} parada(s))")
 
-    best = min(summary.values(), key=lambda f: (f["price"], f["stops"]))
-    print(f"\nÓptimo global: {best['airline']} {best['flight_id']} @ ${best['price']} ({best['stops']} stops)")
+    print(f"\nÓptimo global: {cheapest['airline']} {cheapest['flight_id']} @ ${cheapest['price']} ({cheapest['stops']} parada(s))")
